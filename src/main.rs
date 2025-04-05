@@ -1,19 +1,11 @@
 #![allow(unused_imports)]
-use std::net::TcpListener;
+use crate::kafka::server::Server;
 
-fn main() {
+mod kafka;
+
+#[tokio::main]
+async fn main() {
     // Uncomment this block to pass the first stage
-
-    let listener = TcpListener::bind("127.0.0.1:9092").unwrap();
-    
-    for stream in listener.incoming() {
-        match stream {
-            Ok(_stream) => {
-                println!("accepted new connection");
-            }
-            Err(e) => {
-                println!("error: {}", e);
-            }
-        }
-    }
+    let server = Server::new();
+    server.run("127.0.0.1", 9092).await;
 }
