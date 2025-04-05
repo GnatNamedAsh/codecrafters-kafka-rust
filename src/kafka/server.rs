@@ -8,23 +8,44 @@ use std::sync::Arc;
 
 pub struct Connection {
     stream: TcpStream,
+    correlation_id: i32,
+    api_key: i16,
+    api_version: i16
 }
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
         Connection {
             stream,
+            correlation_id: 0,
+            api_key: 0,
+            api_version: 0
         }
     }
 
-    pub async fn read(&mut self) -> Result<String, io::Error> {
-        let mut buffer = [0; 1024];
-        let n = self.stream.read(&mut buffer).await?;
-        Ok(String::from_utf8_lossy(&buffer[..n]).to_string())
+    // Read the request header
+    // The request header is 12 bytes long
+    // the first 4 bytes are the length of the request (int32)
+    // the next 2 bytes are the request API key (int16)
+    // the next 2 bytes are the request API version (int16)
+    // the final 4 bytes are the correlation ID (int32)
+    pub async fn read(&mut self) -> Result<[u8; 2048], io::Error> {
+      // TODO: this is a hack to get the request header, we should use a buffer pool or
+      // specify the exact size of the request header
+      let mut request_header: [u8; 2048] = [0; 2048];
+      self.stream.read(&mut request_header).await?;
+      self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
+      if self.correlation_id != 0 {
+        println!("correlation_id: {}", self.correlation_id);
+      }
+      self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
+      self.api_version = i16::from_be_bytes(request_header[6..8].try_into().unwrap());
+      Ok(request_header)
     }
 
     pub async fn write(&mut self) -> Result<(), io::Error> {
-        let header: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07];
+        let mut header: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        header[4..8].copy_from_slice(&self.correlation_id.to_be_bytes());
         self.stream.write(&header).await?;
         self.stream.flush().await?;
         Ok(())
