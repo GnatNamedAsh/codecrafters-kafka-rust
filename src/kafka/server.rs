@@ -44,8 +44,14 @@ impl Connection {
     }
 
     pub async fn write(&mut self) -> Result<(), io::Error> {
-        let mut header: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+      // we want to add in the error_code to the response header. It comes after the correlation_id
+      // uses an int16
+        let mut header: [u8; 10] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         header[4..8].copy_from_slice(&self.correlation_id.to_be_bytes());
+        if self.api_key != 4 {
+          header[8..10].copy_from_slice(&35_i16.to_be_bytes());
+        }
+
         self.stream.write(&header).await?;
         self.stream.flush().await?;
         Ok(())
