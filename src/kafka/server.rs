@@ -2,15 +2,19 @@ use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 pub struct Connection {
     stream: TcpStream,
     correlation_id: i32,
     api_key: i16,
     api_version: u16,
+    read_timeout: Duration,
+    write_timeout: Duration,
 }
 
 struct ApiVersion {
@@ -26,6 +30,8 @@ impl Connection {
             correlation_id: 0,
             api_key: 0,
             api_version: 0,
+            read_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(30),
         }
     }
 
@@ -36,14 +42,26 @@ impl Connection {
     // the next 2 bytes are the request API version (int16)
     // the final 4 bytes are the correlation ID (int32)
     pub async fn read(&mut self) -> Result<[u8; 2048], io::Error> {
-        // TODO: this is a hack to get the request header, we should use a buffer pool or
-        // specify the exact size of the request header
         let mut request_header: [u8; 2048] = [0; 2048];
-        self.stream.read(&mut request_header).await?;
-        self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
-        self.api_version = u16::from_be_bytes(request_header[6..8].try_into().unwrap());
-        self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
-        Ok(request_header)
+        match timeout(self.read_timeout, self.stream.read(&mut request_header)).await {
+            Ok(Ok(bytes_read)) if bytes_read == 0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "Connection closed by peer",
+                ));
+            }
+            Ok(Ok(_)) => {
+                self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
+                self.api_version = u16::from_be_bytes(request_header[6..8].try_into().unwrap());
+                self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
+                Ok(request_header)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Read operation timed out",
+            )),
+        }
     }
 
     pub fn determine_api_key_func(
@@ -112,8 +130,6 @@ impl Connection {
     }
 
     pub async fn write(&mut self) -> Result<(), io::Error> {
-        // we want to add in the error_code to the response header. It comes after the correlation_id
-        // uses an int16
         let mut header: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         header[4..8].copy_from_slice(&self.correlation_id.to_be_bytes());
         let (response_body, body_size) = match self.determine_api_key_func() {
@@ -121,15 +137,22 @@ impl Connection {
             None => return Err(io::Error::new(io::ErrorKind::Other, "No function found")),
         };
         header[0..4].copy_from_slice(&(body_size + 4).to_be_bytes());
-        println!("Header going out");
-        self.stream.write(&header).await?;
-        println!("Body going out");
-        let (body, _) = response_body.split_at(body_size as usize);
-        self.stream.write(body).await?;
-        println!("Flushing");
-        self.stream.flush().await?;
-        println!("Done");
-        Ok(())
+
+        match timeout(self.write_timeout, async {
+            self.stream.write(&header).await?;
+            let (body, _) = response_body.split_at(body_size as usize);
+            self.stream.write(body).await?;
+            self.stream.flush().await
+        })
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Write operation timed out",
+            )),
+        }
     }
 
     fn get_supported_apis() -> Vec<ApiVersion> {
@@ -201,6 +224,7 @@ impl Server {
         let mut conn = {
             let mut connections_lock = connections.lock().await;
             if let Some(conn) = connections_lock.remove(&peer_addr) {
+                println!("Starting to handle connection from {}", peer_addr);
                 conn
             } else {
                 println!("Connection not found: {}", peer_addr);
@@ -211,17 +235,17 @@ impl Server {
         loop {
             // Read operation
             match conn.read().await {
-                Ok(_) => {}
+                Ok(_) => {
+                    // Write operation
+                    if let Err(e) = conn.write().await {
+                        println!("Error writing to connection {}: {}", peer_addr, e);
+                        break;
+                    }
+                }
                 Err(e) => {
                     println!("Error reading from connection {}: {}", peer_addr, e);
                     break;
                 }
-            };
-
-            // Write operation
-            if let Err(e) = conn.write().await {
-                println!("Error writing to connection {}: {}", peer_addr, e);
-                break;
             }
         }
 
