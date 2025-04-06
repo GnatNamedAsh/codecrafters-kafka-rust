@@ -48,10 +48,13 @@ impl Connection {
       // uses an int16
         let mut header: [u8; 10] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         header[4..8].copy_from_slice(&self.correlation_id.to_be_bytes());
-        if self.api_key != 4 {
+        let mut response_size: i32 = 0;
+        response_size += 4;
+        if self.api_version != 4 {
           header[8..10].copy_from_slice(&35_i16.to_be_bytes());
+          response_size += 2;
         }
-
+        header[0..4].copy_from_slice(&response_size.to_be_bytes());
         self.stream.write(&header).await?;
         self.stream.flush().await?;
         Ok(())
