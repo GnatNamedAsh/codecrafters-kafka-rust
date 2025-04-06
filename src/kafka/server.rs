@@ -10,7 +10,7 @@ pub struct Connection {
     stream: TcpStream,
     correlation_id: i32,
     api_key: i16,
-    api_version: i16,
+    api_version: u16,
 }
 
 impl Connection {
@@ -35,7 +35,7 @@ impl Connection {
         let mut request_header: [u8; 2048] = [0; 2048];
         self.stream.read(&mut request_header).await?;
         self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
-        self.api_version = i16::from_be_bytes(request_header[6..8].try_into().unwrap());
+        self.api_version = u16::from_be_bytes(request_header[6..8].try_into().unwrap());
         self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
         Ok(request_header)
     }
