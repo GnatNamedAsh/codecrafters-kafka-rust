@@ -101,7 +101,8 @@ impl Connection {
         let (response_body, body_size) = self.determine_api_key_func().unwrap()(self)?;
         header[0..4].copy_from_slice(&(body_size + 4).to_be_bytes());
         self.stream.write(&header).await?;
-        self.stream.write(&response_body).await?;
+        let (body, _) = response_body.split_at(body_size as usize);
+        self.stream.write(body).await?;
         self.stream.flush().await?;
         Ok(())
     }
