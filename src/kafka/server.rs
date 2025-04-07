@@ -7,20 +7,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
+use crate::kafka::api;
+use crate::kafka::topic::Topic;
 
 pub struct Connection {
     stream: TcpStream,
     correlation_id: i32,
-    api_key: i16,
-    api_version: u16,
+    pub api_key: i16,
+    pub api_version: u16,
+    pub body: [u8; 1000],
+    pub body_length: usize,
+    pub topics: Vec<Topic>,
+    pub partition_limit: i32,
+    client_id: String,
     read_timeout: Duration,
     write_timeout: Duration,
-}
-
-struct ApiVersion {
-    api_key: i16,
-    min_version: u16,
-    max_version: u16,
 }
 
 impl Connection {
@@ -30,6 +31,11 @@ impl Connection {
             correlation_id: 0,
             api_key: 0,
             api_version: 0,
+            body: [0; 1000],
+            body_length: 0,
+            topics: Vec::new(),
+            partition_limit: 0,
+            client_id: String::from("default"),
             read_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
         }
@@ -41,8 +47,8 @@ impl Connection {
     // the next 2 bytes are the request API key (int16)
     // the next 2 bytes are the request API version (int16)
     // the final 4 bytes are the correlation ID (int32)
-    pub async fn read(&mut self) -> Result<[u8; 2048], io::Error> {
-        let mut request_header: [u8; 2048] = [0; 2048];
+    pub async fn read(&mut self) -> Result<(), io::Error> {
+        let mut request_header: [u8; 1024] = [0; 1024];
         match timeout(self.read_timeout, self.stream.read(&mut request_header)).await {
             Ok(Ok(bytes_read)) if bytes_read == 0 => {
                 return Err(io::Error::new(
@@ -51,10 +57,34 @@ impl Connection {
                 ));
             }
             Ok(Ok(_)) => {
+                let message_size = i32::from_be_bytes(request_header[0..4].try_into().unwrap());
                 self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
                 self.api_version = u16::from_be_bytes(request_header[6..8].try_into().unwrap());
                 self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
-                Ok(request_header)
+                let client_id_length = i16::from_be_bytes(request_header[12..14].try_into().unwrap());
+                let mut next_index = 14 + client_id_length as usize;
+                self.client_id = String::from_utf8(request_header[14..next_index].to_vec()).unwrap();
+                // tag buffer after client id, length is 1 byte, ignore it
+                next_index += 1;
+                // check if we're at the end of the request message
+                if (next_index - 4) >= (message_size as usize) {
+                    self.body_length = 0;
+                } else {
+                    self.body_length = (message_size as usize) - next_index + 4;
+                    // theoretically, the body is the remaining bytes in the request header
+                    // i.e. if the message size is 32, and the client_id_length is 9, we're at index 23 + 1 for the tag buffer, so 24
+                    // since the message size bytes are not calculated as part of the message size, we need to add back the 4 bytes for the message size 
+                    // the body is the remaining bytes, so 32 - next_index + 4 = 32 - 24 + 4 = 12
+                    
+                    // this means the totoal protocol message is really 36 bytes, but the message size is 32
+                    // the header takes up 8 bytes, the client_id + length bytes take up 11 bytes, and the tag buffer takes up 1 byte
+                    // so the body is the remaining bytes, which is 32 - 8 - 11 - 1 = 12
+
+                    // we add 4 to account for the message size bytes at the start, then copy to the body
+                    self.body[0..self.body_length].copy_from_slice(&request_header[next_index..message_size as usize + 4]);
+                }
+
+                Ok(())
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(io::Error::new(
@@ -68,65 +98,10 @@ impl Connection {
         &self,
     ) -> Option<fn(&mut Connection) -> Result<([u8; 1016], i32), io::Error>> {
         match self.api_key {
-            18 => Some(Self::handle_api_key_18),
+            18 => Some(api::handle_api_key_18),
+            75 => Some(api::handle_api_key_75),
             _ => None,
         }
-    }
-
-    pub fn handle_api_key_18(&mut self) -> Result<([u8; 1016], i32), io::Error> {
-        let tag_buffer = &0_i8.to_be_bytes();
-        // TODO: Implement logic for api key 18 - ApiVersionsRequest
-        // https://kafka.apache.org/26/protocol.html#The_Messages_ApiVersions
-        // The versions request contains
-        // header:
-        // 4 bytes (int32): size of the request
-        // 4 bytes (int32): correlation id
-        // body/response:
-        // 2 bytes (int16): error code (35 for error wrong api version, 0 for success)
-        // num_api_keys (int8): number of api keys in the list
-        // api_keys ->
-        // 2 bytes (int16): api key
-        // 2 bytes (int16): min version
-        // 2 bytes (int16): max version
-        //
-        // 4 bytes (int32): throttle_time_ms (0 for now)
-        let mut response_body: [u8; 1016] = [0x00; 1016];
-        if self.api_version > 4 {
-            response_body[0..2].copy_from_slice(&35_i16.to_be_bytes());
-            return Ok((response_body, 2));
-        }
-        println!("Getting supported apis");
-        let supported_apis = Self::get_supported_apis();
-
-        // There needs to be a tag buffer between keys, and a tag buffer after the throttle_time_ms
-        // error code
-        response_body[0..2].copy_from_slice(&0_i16.to_be_bytes());
-        // num_api_keys
-        let num_api_keys = supported_apis.len() as i8;
-        // kafka takes the length of the array + 1 as the number of api keys
-        response_body[2..3].copy_from_slice(&(num_api_keys + 1).to_be_bytes());
-        // api_keys ->
-        let mut start_index = 3;
-        for api in supported_apis {
-            response_body[start_index..start_index + 2].copy_from_slice(&api.api_key.to_be_bytes());
-            start_index += 2;
-            response_body[start_index..start_index + 2]
-                .copy_from_slice(&api.min_version.to_be_bytes());
-            start_index += 2;
-            response_body[start_index..start_index + 2]
-                .copy_from_slice(&api.max_version.to_be_bytes());
-            start_index += 2;
-            response_body[start_index..start_index + 1].copy_from_slice(tag_buffer);
-            start_index += 1;
-        }
-
-        // throttle_time_ms
-        response_body[start_index..start_index + 4].copy_from_slice(&0_i32.to_be_bytes());
-        start_index += 4;
-        // tag buffer
-        response_body[start_index..start_index + 1].copy_from_slice(tag_buffer);
-        println!("Response body going out");
-        Ok((response_body, (start_index + 1) as i32))
     }
 
     pub async fn write(&mut self) -> Result<(), io::Error> {
@@ -153,21 +128,6 @@ impl Connection {
                 "Write operation timed out",
             )),
         }
-    }
-
-    fn get_supported_apis() -> Vec<ApiVersion> {
-        vec![
-            ApiVersion {
-                api_key: 18,
-                min_version: 0,
-                max_version: 4,
-            },
-            ApiVersion {
-                api_key: 75,
-                min_version: 0,
-                max_version: 0,
-            },
-        ]
     }
 }
 
