@@ -1,8 +1,7 @@
-use crate::kafka::api;
-use crate::kafka::topic::Topic;
+use crate::kafka::{api, models, topic::Topic};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -136,12 +135,15 @@ impl Connection {
 
 pub struct Server {
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
+    // cluster metadata is a map of a topic name to its corresponding data
+    topic_records: Arc<Mutex<HashMap<String, models::TopicRecord>>>,
 }
 
 impl Server {
     pub fn new() -> Self {
         Server {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            topic_records: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
