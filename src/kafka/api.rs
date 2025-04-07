@@ -85,10 +85,10 @@ pub fn handle_api_key_18(connection: &mut Connection) -> Result<([u8; 1016], i32
 fn handle_api_key_75_unknown_topic(
     response_buffer: &mut [u8; 1016],
     start_index: usize,
-    topic: Topic,
+    topic: &Topic,
 ) -> Result<usize, io::Error> {
     let mut end_index = start_index;
-    let topic_name = topic.name;
+    let topic_name = &topic.name;
     // we'll handle the length of the array outside of this function - this is just for putting in an unknown topic when the upstream function runs into an unknown topic
     // topic ->
     //   error_code (int16) - 3 is for unknown topic
@@ -103,12 +103,14 @@ fn handle_api_key_75_unknown_topic(
     end_index += 2;
     // topic name length (length of the string + 1)
     let topic_name_length = 1 + topic_name.len() as i8;
+    println!("topic_name_length: {}", topic_name_length);
+    println!("topic_name: {}", topic_name);
     response_buffer[end_index..end_index + 1].copy_from_slice(&topic_name_length.to_be_bytes());
     end_index += 1;
     // topic name
-    response_buffer[end_index..end_index + topic_name_length as usize]
+    response_buffer[end_index..end_index - 1 + topic_name_length as usize]
         .copy_from_slice(topic_name.as_bytes());
-    end_index += topic_name_length as usize;
+    end_index += (topic_name_length - 1) as usize;
     // topc id
     response_buffer[end_index..end_index + 16].copy_from_slice(&[0; 16]);
     end_index += 16;
@@ -120,7 +122,8 @@ fn handle_api_key_75_unknown_topic(
     end_index += 1;
     // authorized_operations
     // 0000 1101 1111 1000 is the bitmask for the operations expected to be returned
-    response_buffer[end_index..end_index + 4].copy_from_slice(&0x0d_f8_i32.to_be_bytes());
+    // nvm make it 0 for now
+    response_buffer[end_index..end_index + 4].copy_from_slice(&0_i32.to_be_bytes());
     end_index += 4;
 
     Ok(end_index)
@@ -206,12 +209,18 @@ pub fn handle_api_key_75(connection: &mut Connection) -> Result<([u8; 1016], i32
 
     // From here, we start parsing the body of the request for topics
     parse_body(connection)?;
-    start_index =
-        handle_api_key_75_unknown_topic(&mut response_body, start_index, connection.topics[0])?;
+    // we need to set the length of the array in the buffer
+    response_body[start_index..start_index + 1]
+        .copy_from_slice(&((connection.topics.len() + 1) as u8).to_be_bytes());
+    start_index += 1;
+    connection.topics.iter().for_each(|topic| {
+        start_index =
+            handle_api_key_75_unknown_topic(&mut response_body, start_index, topic).unwrap();
+    });
     response_body[start_index..start_index + 1].copy_from_slice(tag_buffer);
     start_index += 1;
     // next_cursor (int8) - 0xff null value
-    response_body[start_index..start_index + 1].copy_from_slice(&0xff_i8.to_be_bytes());
+    response_body[start_index..start_index + 1].copy_from_slice(&0xff_u8.to_be_bytes());
     start_index += 1;
     // tag buffer
     response_body[start_index..start_index + 1].copy_from_slice(tag_buffer);

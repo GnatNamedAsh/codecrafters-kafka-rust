@@ -1,3 +1,5 @@
+use crate::kafka::api;
+use crate::kafka::topic::Topic;
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr};
@@ -7,8 +9,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
-use crate::kafka::api;
-use crate::kafka::topic::Topic;
 
 pub struct Connection {
     stream: TcpStream,
@@ -61,9 +61,11 @@ impl Connection {
                 self.api_key = i16::from_be_bytes(request_header[4..6].try_into().unwrap());
                 self.api_version = u16::from_be_bytes(request_header[6..8].try_into().unwrap());
                 self.correlation_id = i32::from_be_bytes(request_header[8..12].try_into().unwrap());
-                let client_id_length = i16::from_be_bytes(request_header[12..14].try_into().unwrap());
+                let client_id_length =
+                    i16::from_be_bytes(request_header[12..14].try_into().unwrap());
                 let mut next_index = 14 + client_id_length as usize;
-                self.client_id = String::from_utf8(request_header[14..next_index].to_vec()).unwrap();
+                self.client_id =
+                    String::from_utf8(request_header[14..next_index].to_vec()).unwrap();
                 // tag buffer after client id, length is 1 byte, ignore it
                 next_index += 1;
                 // check if we're at the end of the request message
@@ -73,15 +75,16 @@ impl Connection {
                     self.body_length = (message_size as usize) - next_index + 4;
                     // theoretically, the body is the remaining bytes in the request header
                     // i.e. if the message size is 32, and the client_id_length is 9, we're at index 23 + 1 for the tag buffer, so 24
-                    // since the message size bytes are not calculated as part of the message size, we need to add back the 4 bytes for the message size 
+                    // since the message size bytes are not calculated as part of the message size, we need to add back the 4 bytes for the message size
                     // the body is the remaining bytes, so 32 - next_index + 4 = 32 - 24 + 4 = 12
-                    
+
                     // this means the totoal protocol message is really 36 bytes, but the message size is 32
                     // the header takes up 8 bytes, the client_id + length bytes take up 11 bytes, and the tag buffer takes up 1 byte
                     // so the body is the remaining bytes, which is 32 - 8 - 11 - 1 = 12
 
                     // we add 4 to account for the message size bytes at the start, then copy to the body
-                    self.body[0..self.body_length].copy_from_slice(&request_header[next_index..message_size as usize + 4]);
+                    self.body[0..self.body_length]
+                        .copy_from_slice(&request_header[next_index..message_size as usize + 4]);
                 }
 
                 Ok(())
